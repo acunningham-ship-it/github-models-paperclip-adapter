@@ -1,17 +1,12 @@
 /**
- * Environment test for the OpenRouter Claude-Code adapter.
+ * Environment test for the GitHub Models Paperclip adapter.
  *
- * Validates that:
- *   1. The local `claude` CLI binary is on PATH (and reports a version).
- *   2. An OpenRouter API key is reachable (config.env > process.env).
- *   3. The OpenRouter models endpoint is reachable (network + key valid).
- *
- * Errors fail the check; warnings degrade to "warn" status; everything else
- * is "info" and the overall status is "pass".
+ * Checks:
+ *   1. GITHUB_TOKEN is set (config.env > process.env)
+ *   2. Token can reach GitHub Models API (live ping)
+ *   3. Model is configured
  */
 
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import type {
   AdapterEnvironmentCheck,
   AdapterEnvironmentCheckLevel,
@@ -20,14 +15,12 @@ import type {
 } from "@paperclipai/adapter-utils";
 import {
   ADAPTER_TYPE,
-  DEFAULT_CLAUDE_COMMAND,
   DEFAULT_MODEL,
-  OPENROUTER_MODELS_URL,
+  GITHUB_MODELS_BASE_URL,
+  GITHUB_MODELS_CHAT_PATH,
 } from "../shared/constants.js";
 
-const execFileAsync = promisify(execFile);
-
-function asString(value: unknown): string | undefined {
+function asStr(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
@@ -37,147 +30,87 @@ function makeCheck(
   message: string,
   extras: { detail?: string | null; hint?: string | null } = {},
 ): AdapterEnvironmentCheck {
-  return {
-    code,
-    level,
-    message,
-    detail: extras.detail ?? null,
-    hint: extras.hint ?? null,
-  };
+  return { code, level, message, detail: extras.detail ?? null, hint: extras.hint ?? null };
 }
 
-function resolveEnv(config: Record<string, unknown>): Record<string, string> {
+function resolveToken(config: Record<string, unknown>): {
+  token: string | null;
+  source: string;
+} {
   const envConfig = (config.env ?? {}) as Record<string, unknown>;
-  const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(envConfig)) {
-    if (typeof value === "string" && value.length > 0) {
-      out[key] = value;
-    }
-  }
-  return out;
+  const fromConfig =
+    typeof envConfig.GITHUB_TOKEN === "string" ? envConfig.GITHUB_TOKEN.trim() : "";
+  if (fromConfig) return { token: fromConfig, source: "agent.env.GITHUB_TOKEN" };
+  const fromProc = (process.env.GITHUB_TOKEN ?? "").trim();
+  if (fromProc) return { token: fromProc, source: "process.env.GITHUB_TOKEN" };
+  return { token: null, source: "missing" };
 }
 
-async function checkClaudeCli(command: string): Promise<AdapterEnvironmentCheck> {
+async function pingGitHubModels(
+  token: string,
+  model: string,
+): Promise<AdapterEnvironmentCheck> {
+  const url = GITHUB_MODELS_BASE_URL + GITHUB_MODELS_CHAT_PATH;
   try {
-    const { stdout } = await execFileAsync(command, ["--version"], { timeout: 10_000 });
-    const version = stdout.trim() || "(unknown version)";
-    return makeCheck("info", "openrouter_claude_cli_found", `Claude CLI: ${version}`);
-  } catch (err) {
-    const e = err as NodeJS.ErrnoException;
-    if (e.code === "ENOENT") {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "User-Agent": "github-models-paperclip-adapter/0.5",
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content: "ping" }],
+        max_tokens: 1,
+        stream: false,
+      }),
+      signal: AbortSignal.timeout(12_000),
+    });
+
+    if (resp.status === 401 || resp.status === 403) {
       return makeCheck(
         "error",
-        "openrouter_claude_cli_missing",
-        `Claude CLI "${command}" not found in PATH`,
-        { hint: "Install Claude Code: npm install -g @anthropic-ai/claude-code" },
+        "github_models_auth_failed",
+        `GitHub Models rejected the token (HTTP ${resp.status})`,
+        { hint: "Ensure the PAT has models:read scope (fine-grained token)." },
       );
     }
-    return makeCheck(
-      "warn",
-      "openrouter_claude_cli_unreliable",
-      `Claude CLI "${command}" exists but --version failed`,
-      {
-        detail: (e as Error).message ?? null,
-        hint: "Run the CLI manually to confirm it works.",
-      },
-    );
-  }
-}
-
-function checkApiKey(
-  config: Record<string, unknown>,
-  resolvedEnv: Record<string, string>,
-): AdapterEnvironmentCheck {
-  const fromConfigOR = resolvedEnv.OPENROUTER_API_KEY;
-  const fromConfigAnthropic = resolvedEnv.ANTHROPIC_API_KEY;
-  const fromProcOR = (process.env.OPENROUTER_API_KEY ?? "").trim();
-  const fromProcAnthropic = (process.env.ANTHROPIC_API_KEY ?? "").trim();
-  const sources: string[] = [];
-  if (fromConfigOR) sources.push("agent.env.OPENROUTER_API_KEY");
-  if (fromConfigAnthropic) sources.push("agent.env.ANTHROPIC_API_KEY");
-  if (fromProcOR) sources.push("process.env.OPENROUTER_API_KEY");
-  if (fromProcAnthropic) sources.push("process.env.ANTHROPIC_API_KEY");
-
-  // Suppress unused-arg warning in strict mode without changing behavior.
-  void config;
-
-  if (sources.length === 0) {
-    return makeCheck("error", "openrouter_no_api_key", "OpenRouter API key not configured", {
-      hint:
-        "Set OPENROUTER_API_KEY (preferred) or ANTHROPIC_API_KEY in the agent's adapter env, " +
-        "or in the Paperclip server process environment.",
-    });
-  }
-
-  return makeCheck(
-    "info",
-    "openrouter_api_key_found",
-    `OpenRouter API key resolved from: ${sources[0]}`,
-    sources.length > 1 ? { detail: `Other sources also present: ${sources.slice(1).join(", ")}` } : {},
-  );
-}
-
-function checkModel(config: Record<string, unknown>): AdapterEnvironmentCheck {
-  const model = asString(config.model);
-  if (!model) {
-    return makeCheck(
-      "warn",
-      "openrouter_no_model",
-      `No model specified — adapter will fall back to "${DEFAULT_MODEL}"`,
-      {
-        hint: "Set adapterConfig.model to an OpenRouter model id (e.g. anthropic/claude-sonnet-4-6).",
-      },
-    );
-  }
-  return makeCheck("info", "openrouter_model_configured", `Model: ${model}`);
-}
-
-async function checkOpenRouterReachable(
-  resolvedEnv: Record<string, string>,
-): Promise<AdapterEnvironmentCheck> {
-  const apiKey =
-    resolvedEnv.OPENROUTER_API_KEY ??
-    resolvedEnv.ANTHROPIC_API_KEY ??
-    (process.env.OPENROUTER_API_KEY ?? "").trim() ??
-    (process.env.ANTHROPIC_API_KEY ?? "").trim();
-  const headers: Record<string, string> = {
-    accept: "application/json",
-    "user-agent": "openrouter-paperclip-adapter/0.1",
-  };
-  if (apiKey) headers.authorization = `Bearer ${apiKey}`;
-
-  try {
-    const response = await fetch(OPENROUTER_MODELS_URL, {
-      method: "GET",
-      headers,
-      signal: AbortSignal.timeout(8_000),
-    });
-    if (!response.ok) {
-      if (response.status === 401 || response.status === 403) {
-        return makeCheck(
-          "error",
-          "openrouter_auth_failed",
-          `OpenRouter rejected the API key (HTTP ${response.status})`,
-          { hint: "Verify the key at https://openrouter.ai/keys" },
-        );
+    if (resp.status === 404) {
+      return makeCheck(
+        "warn",
+        "github_models_model_not_found",
+        `Model "${model}" returned 404 — may not be available`,
+        { hint: "Check the GitHub Models catalog for available model IDs." },
+      );
+    }
+    if (!resp.ok) {
+      let detail: string | null = null;
+      try {
+        const j = (await resp.json()) as { error?: { message?: string } };
+        detail = j.error?.message ?? null;
+      } catch {
+        // ignore
       }
       return makeCheck(
         "warn",
-        "openrouter_models_endpoint_unhappy",
-        `OpenRouter /models returned HTTP ${response.status}`,
+        "github_models_api_error",
+        `GitHub Models API returned HTTP ${resp.status}`,
+        { detail },
       );
     }
     return makeCheck(
       "info",
-      "openrouter_reachable",
-      "OpenRouter /models endpoint reachable",
+      "github_models_reachable",
+      `GitHub Models API reachable, model "${model}" responded`,
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return makeCheck(
       "warn",
-      "openrouter_unreachable",
-      "Could not reach OpenRouter /models endpoint",
+      "github_models_unreachable",
+      "Could not reach GitHub Models API",
       { detail: message, hint: "Check network connectivity from the Paperclip host." },
     );
   }
@@ -187,36 +120,42 @@ export async function testEnvironment(
   ctx: AdapterEnvironmentTestContext,
 ): Promise<AdapterEnvironmentTestResult> {
   const config = (ctx.config ?? {}) as Record<string, unknown>;
-  const command = asString(config.command) ?? DEFAULT_CLAUDE_COMMAND;
-  const resolvedEnv = resolveEnv(config);
   const checks: AdapterEnvironmentCheck[] = [];
 
-  // 1. Claude CLI installed?
-  const cliCheck = await checkClaudeCli(command);
-  checks.push(cliCheck);
-  if (cliCheck.level === "error") {
-    return {
-      adapterType: ADAPTER_TYPE,
-      status: "fail",
-      checks,
-      testedAt: new Date().toISOString(),
-    };
+  // 1. GITHUB_TOKEN
+  const { token, source } = resolveToken(config);
+  if (!token) {
+    checks.push(
+      makeCheck("error", "github_models_no_token", "GITHUB_TOKEN not configured", {
+        hint:
+          "Set GITHUB_TOKEN in adapterConfig.env.GITHUB_TOKEN or the server process environment. " +
+          "Create a fine-grained PAT at github.com/settings/tokens with models:read scope.",
+      }),
+    );
+    return { adapterType: ADAPTER_TYPE, status: "fail", checks, testedAt: new Date().toISOString() };
+  }
+  checks.push(
+    makeCheck("info", "github_models_token_found", `GITHUB_TOKEN resolved from: ${source}`),
+  );
+
+  // 2. Model
+  const model = asStr(config.model) ?? DEFAULT_MODEL;
+  if (!asStr(config.model)) {
+    checks.push(
+      makeCheck(
+        "warn",
+        "github_models_no_model",
+        `No model specified — will use default "${DEFAULT_MODEL}"`,
+        { hint: "Set adapterConfig.model to a GitHub Models model id (e.g. gpt-4o-mini)." },
+      ),
+    );
+  } else {
+    checks.push(makeCheck("info", "github_models_model_configured", `Model: ${model}`));
   }
 
-  // 2. API key resolvable?
-  const apiKeyCheck = checkApiKey(config, resolvedEnv);
-  checks.push(apiKeyCheck);
-
-  // 3. Model configured?
-  checks.push(checkModel(config));
-
-  // 4. OpenRouter reachable?
-  // Only probe the network if we have a key — otherwise the unauthenticated
-  // call is noisy and adds nothing the API-key check did not already say.
-  if (apiKeyCheck.level !== "error") {
-    const reach = await checkOpenRouterReachable(resolvedEnv);
-    checks.push(reach);
-  }
+  // 3. Live ping
+  const pingCheck = await pingGitHubModels(token, model);
+  checks.push(pingCheck);
 
   const hasError = checks.some((c) => c.level === "error");
   const hasWarn = checks.some((c) => c.level === "warn");

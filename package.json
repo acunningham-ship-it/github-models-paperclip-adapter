@@ -1,6 +1,6 @@
 {
   "name": "github-models-paperclip-adapter",
-  "version": "0.0.1",
+  "version": "0.5.0",
   "description": "Paperclip adapter that runs agents against GitHub's free Models API. No Copilot subscription needed — just a GitHub PAT with models:read scope.",
   "type": "module",
   "license": "MIT",

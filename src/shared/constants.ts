@@ -3,21 +3,19 @@
  */
 
 export const ADAPTER_TYPE = "github_models";
-export const ADAPTER_LABEL = "github_models";
+export const ADAPTER_LABEL = "GitHub Models (free API)";
 export const PROVIDER_SLUG = "github_models";
 export const BILLER_SLUG = "github_models";
 
 export const GITHUB_MODELS_BASE_URL = "https://models.inference.ai.azure.com";
+export const GITHUB_MODELS_CHAT_PATH = "/chat/completions";
+export const GITHUB_MODELS_LIST_PATH = "/models";
 
 export const DEFAULT_MODEL = "gpt-4o-mini";
 export const DEFAULT_TIMEOUT_SEC = 300;
-export const DEFAULT_GRACE_SEC = 10;
 
-export const DEFAULT_PROMPT_TEMPLATE = `{{instructions}}
-
-{{paperclipContext}}
-
-{{taskBody}}`;
+export const DEFAULT_PROMPT_TEMPLATE =
+  "You are agent {{agent.id}} ({{agent.name}}). Continue your Paperclip work.";
 
 /**
  * Models known to be free on GitHub Models (subject to daily quota).
